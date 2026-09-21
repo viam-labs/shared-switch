@@ -6,12 +6,30 @@ Viam module for a reference-counted GPIO switch. Multiple clients `acquire` and 
 
 - `viam:shared-switch:refcounted` (`rdk:component:switch`) — ref-counted switch backed by a board GPIO pin.
 
+### Config
+
+```json
+{
+  "name": "vacuum",
+  "model": "viam:shared-switch:refcounted",
+  "attributes": {
+    "board": "pi-board",
+    "pin": "15",
+    "active_high": true
+  }
+}
+```
+
+- `board` *(string, required)* — name of the `board` component providing the GPIO pin.
+- `pin` *(string, required)* — pin name/number on that board.
+- `active_high` *(bool, default `true`)* — set to `false` for active-low wiring.
+
 ## DoCommand contract
 
-- `{"op": "acquire", "client_id": "<id>"}` — register a holder.
-- `{"op": "release", "client_id": "<id>"}` — remove a holder.
-- `{"op": "status"}` — returns pin state, holders, and manual-override flag.
-- `{"op": "clear"}` — drop all holders (recovery for a client that crashed without releasing).
-- `{"op": "auto"}` — clear the manual override and resume holder-driven mode.
+- `{"command": "acquire", "client_id": "<id>"}` — register a holder.
+- `{"command": "release", "client_id": "<id>"}` — remove a holder.
+- `{"command": "clear"}` — drop all holders (recovery for a client that crashed without releasing; also the emergency "everybody off" hook).
 
-`SetPosition(0|1)` sets a hard manual override that pins the switch until cleared with `{"op": "auto"}`. `GetPosition()` returns the current pin state (0 or 1). `GetNumberOfPositions()` returns 2 (`off`, `on`).
+`client_id` must be non-empty and cannot be `"manual"` — that name is reserved for the UI toggle.
+
+`SetPosition(1)` adds a virtual `"manual"` holder; `SetPosition(0)` removes it. `SetPosition(0)` does **not** stop the load if a real client is still holding — that's what `{"command":"clear"}` is for. `GetPosition()` returns `1` if any client holds, else `0`. `GetNumberOfPositions()` returns 2 (`off`, `on`).
