@@ -1,0 +1,29 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "viam:shared-switch",
+  "visibility": "public",
+  "url": "https://github.com/viam-labs/shared-switch",
+  "description": "Reference-counted GPIO switch shared across multiple clients.",
+  "models": [
+    {
+      "api": "rdk:component:switch",
+      "model": "viam:shared-switch:refcounted",
+      "short_description": "A GPIO-backed switch that stays on while any client holds it and turns off when all have released.",
+      "markdown_link": "README.md"
+    }
+  ],
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/shared-switch",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}

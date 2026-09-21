@@ -1,0 +1,8 @@
+.DS_Store
+*.swp
+
+bin
+*.exe
+
+module.tar.gz
+.VIAM_RELOAD_ARCHIVE.tar.gz
