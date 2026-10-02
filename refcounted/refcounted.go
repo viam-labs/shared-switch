@@ -69,6 +69,8 @@ type refcounted struct {
 	resource.AlwaysRebuild
 	resource.Named
 	logger     logging.Logger
+	boardName  string
+	pinName    string
 	pin        board.GPIOPin
 	activeHigh bool
 
@@ -92,10 +94,13 @@ func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resourc
 	r := &refcounted{
 		Named:      conf.ResourceName().AsNamed(),
 		logger:     logger,
+		boardName:  cfg.Board,
+		pinName:    cfg.Pin,
 		pin:        pin,
 		activeHigh: cfg.activeHigh(),
 		holders:    make(map[string]struct{}),
 	}
+	logger.Infof("configured: board=%q pin=%q active_high=%v", r.boardName, r.pinName, r.activeHigh)
 	r.mu.Lock()
 	err = r.applyLocked(ctx)
 	r.mu.Unlock()
@@ -125,10 +130,12 @@ func (r *refcounted) addHolderLocked(ctx context.Context, id string) error {
 		return nil
 	}
 	r.holders[id] = struct{}{}
+	high := r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
+		r.logger.Errorf("acquire %q: pin %q set high=%v failed: %v", id, r.pinName, high, err)
 		return err
 	}
-	r.logger.Infof("acquire %q: holders=%v", id, r.sortedHoldersLocked())
+	r.logger.Infof("acquire %q: pin %q set high=%v holders=%v", id, r.pinName, high, r.sortedHoldersLocked())
 	return nil
 }
 
@@ -138,10 +145,12 @@ func (r *refcounted) removeHolderLocked(ctx context.Context, id string) error {
 		return nil
 	}
 	delete(r.holders, id)
+	high := len(r.holders) > 0 == r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
+		r.logger.Errorf("release %q: pin %q set high=%v failed: %v", id, r.pinName, high, err)
 		return err
 	}
-	r.logger.Infof("release %q: holders=%v", id, r.sortedHoldersLocked())
+	r.logger.Infof("release %q: pin %q set high=%v holders=%v", id, r.pinName, high, r.sortedHoldersLocked())
 	return nil
 }
 
@@ -242,10 +251,12 @@ func (r *refcounted) clear(ctx context.Context) error {
 	}
 	dropped := r.sortedHoldersLocked()
 	r.holders = make(map[string]struct{})
+	high := !r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
+		r.logger.Errorf("clear: pin %q set high=%v failed (dropped=%v): %v", r.pinName, high, dropped, err)
 		return err
 	}
-	r.logger.Infof("clear: dropped=%v", dropped)
+	r.logger.Infof("clear: pin %q set high=%v dropped=%v", r.pinName, high, dropped)
 	return nil
 }
 
@@ -253,7 +264,7 @@ func (r *refcounted) Close(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.pin.Set(ctx, !r.activeHigh, nil); err != nil {
-		r.logger.Warnf("failed to de-energize pin on close: %v", err)
+		r.logger.Warnf("failed to de-energize pin %q on close: %v", r.pinName, err)
 	}
 	return nil
 }
