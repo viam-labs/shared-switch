@@ -113,7 +113,17 @@ func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resourc
 func (r *refcounted) applyLocked(ctx context.Context) error {
 	on := len(r.holders) > 0
 	high := on == r.activeHigh
-	return r.pin.Set(ctx, high, nil)
+	if err := r.pin.Set(ctx, high, nil); err != nil {
+		return err
+	}
+	actual, err := r.pin.Get(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("verify pin %q after Set(high=%v): %w", r.pinName, high, err)
+	}
+	if actual != high {
+		return fmt.Errorf("pin %q state mismatch after Set(high=%v): read back high=%v", r.pinName, high, actual)
+	}
+	return nil
 }
 
 func (r *refcounted) sortedHoldersLocked() []string {
@@ -126,16 +136,14 @@ func (r *refcounted) sortedHoldersLocked() []string {
 }
 
 func (r *refcounted) addHolderLocked(ctx context.Context, id string) error {
-	if _, held := r.holders[id]; held {
-		return nil
-	}
+	_, alreadyHeld := r.holders[id]
 	r.holders[id] = struct{}{}
 	high := r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
-		r.logger.Errorf("acquire %q: pin %q set high=%v failed: %v", id, r.pinName, high, err)
+		r.logger.Errorf("acquire %q (already_held=%v): pin %q set high=%v failed: %v", id, alreadyHeld, r.pinName, high, err)
 		return err
 	}
-	r.logger.Infof("acquire %q: pin %q set high=%v holders=%v", id, r.pinName, high, r.sortedHoldersLocked())
+	r.logger.Infof("acquire %q (already_held=%v): pin %q set high=%v holders=%v", id, alreadyHeld, r.pinName, high, r.sortedHoldersLocked())
 	return nil
 }
 

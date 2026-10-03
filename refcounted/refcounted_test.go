@@ -102,13 +102,14 @@ func TestAcquireEnergizes(t *testing.T) {
 	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 }
 
-func TestAcquireIdempotent(t *testing.T) {
+func TestAcquireReassertsPinOnDuplicate(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
 	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
 	initial := pin.writes()
 	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
-	test.That(t, pin.writes(), test.ShouldEqual, initial)
+	test.That(t, pin.writes(), test.ShouldEqual, initial+1)
+	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 	test.That(t, len(r.holders), test.ShouldEqual, 1)
 }
 
@@ -184,13 +185,14 @@ func TestSetPositionOffKeepsClientHolders(t *testing.T) {
 	test.That(t, manualHeld, test.ShouldBeFalse)
 }
 
-func TestSetPositionOnIdempotent(t *testing.T) {
+func TestSetPositionOnReassertsPinOnDuplicate(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
 	_ = r.SetPosition(ctx, positionOn, nil)
 	initial := pin.writes()
 	_ = r.SetPosition(ctx, positionOn, nil)
-	test.That(t, pin.writes(), test.ShouldEqual, initial)
+	test.That(t, pin.writes(), test.ShouldEqual, initial+1)
+	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 }
 
 func TestSetPositionOffWithoutManualIsNoop(t *testing.T) {
@@ -286,6 +288,40 @@ func TestDoCommandAcquireReleaseRoundtrip(t *testing.T) {
 	_, err = r.DoCommand(ctx, map[string]interface{}{"command": "release", "client_id": "arm1"})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
+}
+
+// --- Pin state read-back verification ---
+
+type stuckLowPin struct {
+	board.GPIOPin
+}
+
+func (p *stuckLowPin) Set(_ context.Context, _ bool, _ map[string]interface{}) error {
+	return nil
+}
+
+func (p *stuckLowPin) Get(_ context.Context, _ map[string]interface{}) (bool, error) {
+	return false, nil
+}
+
+func TestAcquireFailsWhenPinDidNotReachCommandedState(t *testing.T) {
+	r := &refcounted{
+		Named:      resource.NewName(toggleswitch.API, "test").AsNamed(),
+		logger:     logging.NewTestLogger(t),
+		boardName:  "test-board",
+		pinName:    "test-pin",
+		pin:        &stuckLowPin{},
+		activeHigh: true,
+		holders:    make(map[string]struct{}),
+	}
+	r.mu.Lock()
+	initErr := r.applyLocked(context.Background())
+	r.mu.Unlock()
+	test.That(t, initErr, test.ShouldBeNil)
+
+	err := r.acquire(context.Background(), map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "mismatch")
 }
 
 // --- Close ---
