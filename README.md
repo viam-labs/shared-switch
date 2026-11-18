@@ -33,3 +33,7 @@ Viam module for a reference-counted GPIO switch. Multiple clients `acquire` and 
 `client_id` must be non-empty and cannot be `"manual"` — that name is reserved for the UI toggle.
 
 `SetPosition(1)` adds a virtual `"manual"` holder; `SetPosition(0)` removes it. `SetPosition(0)` does **not** stop the load if a real client is still holding — that's what `{"command":"clear"}` is for. `GetPosition()` returns `1` if any client holds, else `0`. `GetNumberOfPositions()` returns 2 (`off`, `on`).
+
+## Persistence
+
+Holders are written to `$VIAM_MODULE_DATA/<resource name>.holders.json` on every change and restored when the resource is built, so a reconfigure, module restart or reboot does not drop a client that is still mid-operation. A restored holder re-energizes the pin until that client releases it or `{"command":"clear"}` is sent. If the file cannot be written, the `acquire`/`release`/`clear` that triggered the write fails and the holder set is left unchanged. A corrupt file fails resource construction rather than silently starting empty.

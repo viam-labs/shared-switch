@@ -2,6 +2,8 @@ package refcounted
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -339,4 +341,90 @@ func TestCloseActiveLow(t *testing.T) {
 	r, pin := newSwitch(t, false)
 	test.That(t, r.Close(context.Background()), test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue) // de-energized under active-low → pin high
+}
+
+// --- persistence ---
+
+func newPersistentSwitch(t *testing.T, path string) (*refcounted, *fakePin) {
+	t.Helper()
+	holders, err := loadHolders(path)
+	test.That(t, err, test.ShouldBeNil)
+	r, pin := newSwitch(t, true)
+	r.holdersPath = path
+	r.holders = holders
+	r.mu.Lock()
+	err = r.applyLocked(context.Background())
+	r.mu.Unlock()
+	test.That(t, err, test.ShouldBeNil)
+	return r, pin
+}
+
+func TestHoldersSurviveRebuild(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "vacuum.holders.json")
+
+	first, _ := newPersistentSwitch(t, path)
+	test.That(t, first.acquire(ctx, map[string]interface{}{"client_id": "arm-a"}), test.ShouldBeNil)
+	test.That(t, first.acquire(ctx, map[string]interface{}{"client_id": "arm-b"}), test.ShouldBeNil)
+	test.That(t, first.Close(ctx), test.ShouldBeNil)
+
+	second, pin := newPersistentSwitch(t, path)
+	test.That(t, pin.isHigh(), test.ShouldBeTrue)
+	test.That(t, second.sortedHoldersLocked(), test.ShouldResemble, []string{"arm-a", "arm-b"})
+
+	test.That(t, second.release(ctx, map[string]interface{}{"client_id": "arm-a"}), test.ShouldBeNil)
+	test.That(t, pin.isHigh(), test.ShouldBeTrue)
+	test.That(t, second.release(ctx, map[string]interface{}{"client_id": "arm-b"}), test.ShouldBeNil)
+	test.That(t, pin.isHigh(), test.ShouldBeFalse)
+
+	third, pin := newPersistentSwitch(t, path)
+	test.That(t, third.sortedHoldersLocked(), test.ShouldBeEmpty)
+	test.That(t, pin.isHigh(), test.ShouldBeFalse)
+}
+
+func TestClearIsPersisted(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "vacuum.holders.json")
+	r, _ := newPersistentSwitch(t, path)
+	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm-a"}), test.ShouldBeNil)
+	test.That(t, r.clear(ctx), test.ShouldBeNil)
+
+	holders, err := loadHolders(path)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, holders, test.ShouldBeEmpty)
+}
+
+func TestAcquireRollsBackWhenPersistFails(t *testing.T) {
+	ctx := context.Background()
+	r, pin := newPersistentSwitch(t, filepath.Join(t.TempDir(), "missing-dir", "vacuum.holders.json"))
+	err := r.acquire(ctx, map[string]interface{}{"client_id": "arm-a"})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, r.sortedHoldersLocked(), test.ShouldBeEmpty)
+	test.That(t, pin.isHigh(), test.ShouldBeFalse)
+}
+
+func TestReleaseRollsBackWhenPersistFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	r, pin := newPersistentSwitch(t, filepath.Join(dir, "vacuum.holders.json"))
+	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm-a"}), test.ShouldBeNil)
+	r.holdersPath = filepath.Join(dir, "missing-dir", "vacuum.holders.json")
+
+	err := r.release(ctx, map[string]interface{}{"client_id": "arm-a"})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, r.sortedHoldersLocked(), test.ShouldResemble, []string{"arm-a"})
+	test.That(t, pin.isHigh(), test.ShouldBeTrue)
+}
+
+func TestLoadHoldersRejectsCorruptFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vacuum.holders.json")
+	test.That(t, os.WriteFile(path, []byte("{not json"), 0o600), test.ShouldBeNil)
+	_, err := loadHolders(path)
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestLoadHoldersMissingFileIsEmpty(t *testing.T) {
+	holders, err := loadHolders(filepath.Join(t.TempDir(), "absent.json"))
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, holders, test.ShouldBeEmpty)
 }

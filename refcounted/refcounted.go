@@ -6,8 +6,11 @@ package refcounted
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -28,6 +31,8 @@ const (
 	// itself as a virtual holder. Reserved so DoCommand callers can't
 	// accidentally release the UI toggle by sending the same id.
 	manualHolder = "manual"
+
+	moduleDataEnvVar = "VIAM_MODULE_DATA"
 )
 
 var positionLabels = []string{"off", "on"}
@@ -74,6 +79,10 @@ type refcounted struct {
 	pin        board.GPIOPin
 	activeHigh bool
 
+	// holdersPath persists holders so a rebuild or restart of this resource does not
+	// silently drop a client that is still mid-operation. Empty disables persistence.
+	holdersPath string
+
 	mu      sync.Mutex
 	holders map[string]struct{}
 }
@@ -91,16 +100,28 @@ func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resourc
 	if err != nil {
 		return nil, fmt.Errorf("resolve pin %q on board %q: %w", cfg.Pin, cfg.Board, err)
 	}
-	r := &refcounted{
-		Named:      conf.ResourceName().AsNamed(),
-		logger:     logger,
-		boardName:  cfg.Board,
-		pinName:    cfg.Pin,
-		pin:        pin,
-		activeHigh: cfg.activeHigh(),
-		holders:    make(map[string]struct{}),
+	var holdersPath string
+	if dir := os.Getenv(moduleDataEnvVar); dir != "" {
+		holdersPath = filepath.Join(dir, conf.ResourceName().Name+".holders.json")
+	} else {
+		logger.Warnf("%s unset: holders are kept in memory only and are lost on rebuild", moduleDataEnvVar)
 	}
-	logger.Infof("configured: board=%q pin=%q active_high=%v", r.boardName, r.pinName, r.activeHigh)
+	holders, err := loadHolders(holdersPath)
+	if err != nil {
+		return nil, err
+	}
+	r := &refcounted{
+		Named:       conf.ResourceName().AsNamed(),
+		logger:      logger,
+		boardName:   cfg.Board,
+		pinName:     cfg.Pin,
+		pin:         pin,
+		activeHigh:  cfg.activeHigh(),
+		holdersPath: holdersPath,
+		holders:     holders,
+	}
+	logger.Infof("configured: board=%q pin=%q active_high=%v holders_file=%q restored_holders=%v",
+		r.boardName, r.pinName, r.activeHigh, r.holdersPath, r.sortedHoldersLocked())
 	r.mu.Lock()
 	err = r.applyLocked(ctx)
 	r.mu.Unlock()
@@ -108,6 +129,60 @@ func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resourc
 		return nil, fmt.Errorf("initial pin write: %w", err)
 	}
 	return r, nil
+}
+
+func loadHolders(path string) (map[string]struct{}, error) {
+	holders := make(map[string]struct{})
+	if path == "" {
+		return holders, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return holders, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read holders file %q: %w", path, err)
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return nil, fmt.Errorf("parse holders file %q: %w", path, err)
+	}
+	for _, id := range ids {
+		holders[id] = struct{}{}
+	}
+	return holders, nil
+}
+
+// persistLocked writes via temp file + rename so a crash mid-write never leaves a
+// truncated file that would fail the next construction.
+func (r *refcounted) persistLocked() error {
+	if r.holdersPath == "" {
+		return nil
+	}
+	data, err := json.Marshal(r.sortedHoldersLocked())
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(r.holdersPath), filepath.Base(r.holdersPath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("persist holders: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("persist holders: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("persist holders: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("persist holders: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), r.holdersPath); err != nil {
+		return fmt.Errorf("persist holders: %w", err)
+	}
+	return nil
 }
 
 func (r *refcounted) applyLocked(ctx context.Context) error {
@@ -138,6 +213,13 @@ func (r *refcounted) sortedHoldersLocked() []string {
 func (r *refcounted) addHolderLocked(ctx context.Context, id string) error {
 	_, alreadyHeld := r.holders[id]
 	r.holders[id] = struct{}{}
+	if !alreadyHeld {
+		if err := r.persistLocked(); err != nil {
+			delete(r.holders, id)
+			r.logger.Errorf("acquire %q: %v", id, err)
+			return err
+		}
+	}
 	high := r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
 		r.logger.Errorf("acquire %q (already_held=%v): pin %q set high=%v failed: %v", id, alreadyHeld, r.pinName, high, err)
@@ -153,6 +235,11 @@ func (r *refcounted) removeHolderLocked(ctx context.Context, id string) error {
 		return nil
 	}
 	delete(r.holders, id)
+	if err := r.persistLocked(); err != nil {
+		r.holders[id] = struct{}{}
+		r.logger.Errorf("release %q: %v", id, err)
+		return err
+	}
 	high := len(r.holders) > 0 == r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
 		r.logger.Errorf("release %q: pin %q set high=%v failed: %v", id, r.pinName, high, err)
@@ -258,7 +345,13 @@ func (r *refcounted) clear(ctx context.Context) error {
 		return nil
 	}
 	dropped := r.sortedHoldersLocked()
+	prev := r.holders
 	r.holders = make(map[string]struct{})
+	if err := r.persistLocked(); err != nil {
+		r.holders = prev
+		r.logger.Errorf("clear: %v", err)
+		return err
+	}
 	high := !r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
 		r.logger.Errorf("clear: pin %q set high=%v failed (dropped=%v): %v", r.pinName, high, dropped, err)
