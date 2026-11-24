@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"go.viam.com/rdk/components/board"
 	toggleswitch "go.viam.com/rdk/components/switch"
@@ -98,16 +99,19 @@ func TestInitialStateOff(t *testing.T) {
 func TestAcquireEnergizes(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
+	_, err := r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 }
 
 func TestAcquireReassertsPinOnDuplicate(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
+	_, err := r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
 	initial := pin.writes()
-	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
+	_, err = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.writes(), test.ShouldEqual, initial+1)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 	test.That(t, len(r.holders), test.ShouldEqual, 1)
@@ -116,18 +120,23 @@ func TestAcquireReassertsPinOnDuplicate(t *testing.T) {
 func TestTwoClientsShareOn(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
-	test.That(t, r.acquire(ctx, map[string]interface{}{"client_id": "arm2"}), test.ShouldBeNil)
-	test.That(t, r.release(ctx, map[string]interface{}{"client_id": "arm1"}), test.ShouldBeNil)
+	_, err := r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
+	_, err = r.acquire(ctx, map[string]interface{}{"client_id": "arm2"})
+	test.That(t, err, test.ShouldBeNil)
+	_, err = r.release(ctx, map[string]interface{}{"client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue)
-	test.That(t, r.release(ctx, map[string]interface{}{"client_id": "arm2"}), test.ShouldBeNil)
+	_, err = r.release(ctx, map[string]interface{}{"client_id": "arm2"})
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
 }
 
 func TestReleaseUnknownClientIsNoop(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	test.That(t, r.release(ctx, map[string]interface{}{"client_id": "nobody"}), test.ShouldBeNil)
+	_, err := r.release(ctx, map[string]interface{}{"client_id": "nobody"})
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
 	test.That(t, len(r.holders), test.ShouldEqual, 0)
 }
@@ -135,9 +144,10 @@ func TestReleaseUnknownClientIsNoop(t *testing.T) {
 func TestClearDropsAllHolders(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm2"})
-	test.That(t, r.clear(ctx), test.ShouldBeNil)
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm2"})
+	_, err := r.clear(ctx)
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
 	test.That(t, len(r.holders), test.ShouldEqual, 0)
 }
@@ -146,9 +156,10 @@ func TestClearAlsoDropsManualHolder(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
 	_ = r.SetPosition(ctx, positionOn, nil)
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
 	test.That(t, len(r.holders), test.ShouldEqual, 2)
-	test.That(t, r.clear(ctx), test.ShouldBeNil)
+	_, err := r.clear(ctx)
+	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(r.holders), test.ShouldEqual, 0)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
 }
@@ -175,7 +186,7 @@ func TestSetPositionOffRemovesManualHolder(t *testing.T) {
 func TestSetPositionOffKeepsClientHolders(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
 	_ = r.SetPosition(ctx, positionOn, nil) // adds manual
 	test.That(t, r.SetPosition(ctx, positionOff, nil), test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue) // arm1 still holds
@@ -213,14 +224,14 @@ func TestSetPositionRejectsInvalid(t *testing.T) {
 
 func TestAcquireRejectsReservedManual(t *testing.T) {
 	r, _ := newSwitch(t, true)
-	err := r.acquire(context.Background(), map[string]interface{}{"client_id": manualHolder})
+	_, err := r.acquire(context.Background(), map[string]interface{}{"client_id": manualHolder})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "reserved")
 }
 
 func TestReleaseRejectsReservedManual(t *testing.T) {
 	r, _ := newSwitch(t, true)
-	err := r.release(context.Background(), map[string]interface{}{"client_id": manualHolder})
+	_, err := r.release(context.Background(), map[string]interface{}{"client_id": manualHolder})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "reserved")
 }
@@ -233,7 +244,7 @@ func TestGetPositionReflectsHolders(t *testing.T) {
 	pos, err := r.GetPosition(ctx, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, pos, test.ShouldEqual, positionOff)
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
 	pos, _ = r.GetPosition(ctx, nil)
 	test.That(t, pos, test.ShouldEqual, positionOn)
 }
@@ -252,7 +263,7 @@ func TestActiveLowInverts(t *testing.T) {
 	r, pin := newSwitch(t, false)
 	ctx := context.Background()
 	test.That(t, pin.isHigh(), test.ShouldBeTrue) // off + active-low → pin high
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
 	test.That(t, pin.isHigh(), test.ShouldBeFalse) // on + active-low → pin low
 }
 
@@ -319,7 +330,7 @@ func TestAcquireFailsWhenPinDidNotReachCommandedState(t *testing.T) {
 	r.mu.Unlock()
 	test.That(t, initErr, test.ShouldBeNil)
 
-	err := r.acquire(context.Background(), map[string]interface{}{"client_id": "arm1"})
+	_, err := r.acquire(context.Background(), map[string]interface{}{"client_id": "arm1"})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "mismatch")
 }
@@ -329,7 +340,7 @@ func TestAcquireFailsWhenPinDidNotReachCommandedState(t *testing.T) {
 func TestCloseDeEnergizes(t *testing.T) {
 	r, pin := newSwitch(t, true)
 	ctx := context.Background()
-	_ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
 	test.That(t, pin.isHigh(), test.ShouldBeTrue)
 	test.That(t, r.Close(ctx), test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeFalse)
@@ -339,4 +350,107 @@ func TestCloseActiveLow(t *testing.T) {
 	r, pin := newSwitch(t, false)
 	test.That(t, r.Close(context.Background()), test.ShouldBeNil)
 	test.That(t, pin.isHigh(), test.ShouldBeTrue) // de-energized under active-low → pin high
+}
+
+// --- DoCommand status response ---
+
+func TestAcquireReleaseReturnStatus(t *testing.T) {
+	r, _ := newSwitch(t, true)
+	ctx := context.Background()
+
+	resp, err := r.DoCommand(ctx, map[string]interface{}{"command": "acquire", "client_id": "arm2"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "on", "holders": []interface{}{"arm2"}})
+
+	resp, err = r.DoCommand(ctx, map[string]interface{}{"command": "acquire", "client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "on", "holders": []interface{}{"arm1", "arm2"}})
+
+	resp, err = r.DoCommand(ctx, map[string]interface{}{"command": "release", "client_id": "arm2"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "on", "holders": []interface{}{"arm1"}})
+
+	resp, err = r.DoCommand(ctx, map[string]interface{}{"command": "release", "client_id": "arm1"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "off", "holders": []interface{}{}})
+}
+
+func TestReleaseUnknownClientReturnsStatus(t *testing.T) {
+	r, _ := newSwitch(t, true)
+	ctx := context.Background()
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	resp, err := r.DoCommand(ctx, map[string]interface{}{"command": "release", "client_id": "nobody"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "on", "holders": []interface{}{"arm1"}})
+}
+
+func TestClearReturnsStatus(t *testing.T) {
+	r, _ := newSwitch(t, true)
+	ctx := context.Background()
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	resp, err := r.DoCommand(ctx, map[string]interface{}{"command": "clear"})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, map[string]interface{}{"state": "off", "holders": []interface{}{}})
+}
+
+func TestAcquireFailureReturnsNilResponse(t *testing.T) {
+	r := &refcounted{
+		Named:      resource.NewName(toggleswitch.API, "test").AsNamed(),
+		logger:     logging.NewTestLogger(t),
+		pin:        &stuckLowPin{},
+		activeHigh: true,
+		holders:    make(map[string]struct{}),
+	}
+	resp, err := r.DoCommand(context.Background(), map[string]interface{}{"command": "acquire", "client_id": "arm1"})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, resp, test.ShouldBeNil)
+}
+
+// --- Periodic status log ---
+
+func TestLogStatusReportsStateAndHolders(t *testing.T) {
+	r, _ := newSwitch(t, true)
+	logger, logs := logging.NewObservedTestLogger(t)
+	r.logger = logger
+	r.pinName = "15"
+	ctx := context.Background()
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_ = r.SetPosition(ctx, positionOn, nil)
+
+	r.logStatus(ctx)
+	entries := logs.FilterMessageSnippet("status:").All()
+	test.That(t, len(entries), test.ShouldEqual, 1)
+	test.That(t, entries[0].Message, test.ShouldEqual, `status: state=on holders=[arm1 manual] pin "15" high=true`)
+}
+
+func TestLogStatusWarnsOnPinMismatch(t *testing.T) {
+	r, pin := newSwitch(t, true)
+	logger, logs := logging.NewObservedTestLogger(t)
+	r.logger = logger
+	ctx := context.Background()
+	_, _ = r.acquire(ctx, map[string]interface{}{"client_id": "arm1"})
+	_ = pin.Set(ctx, false, nil)
+
+	r.logStatus(ctx)
+	entries := logs.FilterMessageSnippet("expected high=true").All()
+	test.That(t, len(entries), test.ShouldEqual, 1)
+	test.That(t, entries[0].Level.String(), test.ShouldEqual, "warn")
+}
+
+func TestStatusLogRunsPeriodicallyAndStopsOnClose(t *testing.T) {
+	r, _ := newSwitch(t, true)
+	logger, logs := logging.NewObservedTestLogger(t)
+	r.logger = logger
+	r.startStatusLog(10 * time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for logs.FilterMessageSnippet("status:").Len() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	test.That(t, logs.FilterMessageSnippet("status:").Len(), test.ShouldBeGreaterThanOrEqualTo, 2)
+
+	test.That(t, r.Close(context.Background()), test.ShouldBeNil)
+	n := logs.FilterMessageSnippet("status:").Len()
+	time.Sleep(50 * time.Millisecond)
+	test.That(t, logs.FilterMessageSnippet("status:").Len(), test.ShouldEqual, n)
 }
