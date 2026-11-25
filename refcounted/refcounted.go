@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"go.viam.com/rdk/components/board"
 	toggleswitch "go.viam.com/rdk/components/switch"
@@ -28,6 +29,8 @@ const (
 	// itself as a virtual holder. Reserved so DoCommand callers can't
 	// accidentally release the UI toggle by sending the same id.
 	manualHolder = "manual"
+
+	statusLogInterval = time.Minute
 )
 
 var positionLabels = []string{"off", "on"}
@@ -76,6 +79,9 @@ type refcounted struct {
 
 	mu      sync.Mutex
 	holders map[string]struct{}
+
+	stopStatusLog context.CancelFunc
+	statusLogDone sync.WaitGroup
 }
 
 func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resource.Config, logger logging.Logger) (toggleswitch.Switch, error) {
@@ -107,7 +113,66 @@ func newRefcounted(ctx context.Context, deps resource.Dependencies, conf resourc
 	if err != nil {
 		return nil, fmt.Errorf("initial pin write: %w", err)
 	}
+	r.startStatusLog(statusLogInterval)
 	return r, nil
+}
+
+func (r *refcounted) startStatusLog(interval time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.stopStatusLog = cancel
+	r.statusLogDone.Add(1)
+	go func() {
+		defer r.statusLogDone.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.logStatus(ctx)
+			}
+		}
+	}()
+}
+
+func (r *refcounted) logStatus(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.stateLocked()
+	holders := r.sortedHoldersLocked()
+	expectedHigh := (state == positionLabels[positionOn]) == r.activeHigh
+	actualHigh, err := r.pin.Get(ctx, nil)
+	if err != nil {
+		r.logger.Warnf("status: state=%s holders=%v pin %q read failed: %v", state, holders, r.pinName, err)
+		return
+	}
+	if actualHigh != expectedHigh {
+		r.logger.Warnf("status: state=%s holders=%v pin %q high=%v but expected high=%v", state, holders, r.pinName, actualHigh, expectedHigh)
+		return
+	}
+	r.logger.Infof("status: state=%s holders=%v pin %q high=%v", state, holders, r.pinName, actualHigh)
+}
+
+func (r *refcounted) stateLocked() string {
+	if len(r.holders) > 0 {
+		return positionLabels[positionOn]
+	}
+	return positionLabels[positionOff]
+}
+
+// statusLocked is the DoCommand response shape for acquire/release/clear.
+// holders is []interface{} so it converts cleanly to a protobuf ListValue.
+func (r *refcounted) statusLocked() map[string]interface{} {
+	sorted := r.sortedHoldersLocked()
+	holders := make([]interface{}, len(sorted))
+	for i, id := range sorted {
+		holders[i] = id
+	}
+	return map[string]interface{}{
+		"state":   r.stateLocked(),
+		"holders": holders,
+	}
 }
 
 func (r *refcounted) applyLocked(ctx context.Context) error {
@@ -203,11 +268,11 @@ func (r *refcounted) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	}
 	switch name {
 	case "acquire":
-		return nil, r.acquire(ctx, cmd)
+		return r.acquire(ctx, cmd)
 	case "release":
-		return nil, r.release(ctx, cmd)
+		return r.release(ctx, cmd)
 	case "clear":
-		return nil, r.clear(ctx)
+		return r.clear(ctx)
 	default:
 		return nil, fmt.Errorf("unknown command %q", name)
 	}
@@ -231,44 +296,55 @@ func (r *refcounted) clientID(cmd map[string]interface{}) (string, error) {
 	return id, nil
 }
 
-func (r *refcounted) acquire(ctx context.Context, cmd map[string]interface{}) error {
+func (r *refcounted) acquire(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	id, err := r.clientID(cmd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.addHolderLocked(ctx, id)
+	if err := r.addHolderLocked(ctx, id); err != nil {
+		return nil, err
+	}
+	return r.statusLocked(), nil
 }
 
-func (r *refcounted) release(ctx context.Context, cmd map[string]interface{}) error {
+func (r *refcounted) release(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	id, err := r.clientID(cmd)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.removeHolderLocked(ctx, id)
+	if err := r.removeHolderLocked(ctx, id); err != nil {
+		return nil, err
+	}
+	return r.statusLocked(), nil
 }
 
-func (r *refcounted) clear(ctx context.Context) error {
+func (r *refcounted) clear(ctx context.Context) (map[string]interface{}, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.holders) == 0 {
-		return nil
+		return r.statusLocked(), nil
 	}
 	dropped := r.sortedHoldersLocked()
 	r.holders = make(map[string]struct{})
 	high := !r.activeHigh
 	if err := r.applyLocked(ctx); err != nil {
 		r.logger.Errorf("clear: pin %q set high=%v failed (dropped=%v): %v", r.pinName, high, dropped, err)
-		return err
+		return nil, err
 	}
 	r.logger.Infof("clear: pin %q set high=%v dropped=%v", r.pinName, high, dropped)
-	return nil
+	return r.statusLocked(), nil
 }
 
 func (r *refcounted) Close(ctx context.Context) error {
+	// Stop the status logger before taking mu: it acquires mu on every tick.
+	if r.stopStatusLog != nil {
+		r.stopStatusLog()
+		r.statusLogDone.Wait()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.pin.Set(ctx, !r.activeHigh, nil); err != nil {
